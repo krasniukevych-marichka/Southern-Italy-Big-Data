@@ -1,0 +1,46 @@
+resources:
+  jobs:
+    airbnb_city_pipeline:
+      name: airbnb_city_pipeline
+      tasks:
+        - task_key: bronze
+          notebook_task:
+            notebook_path: /Workspace/Users/trush.pn@ucu.edu.ua/Southern-Italy-Big-Data/02_bronze
+            source: WORKSPACE
+        - task_key: silver
+          depends_on:
+            - task_key: bronze
+          notebook_task:
+            notebook_path: /Workspace/Users/trush.pn@ucu.edu.ua/Southern-Italy-Big-Data/03_silver
+            source: WORKSPACE
+        - task_key: gold_features
+          depends_on:
+            - task_key: silver
+          notebook_task:
+            notebook_path: /Workspace/Users/trush.pn@ucu.edu.ua/Southern-Italy-Big-Data/04_gold_features
+            source: WORKSPACE
+        - task_key: score_city
+          depends_on:
+            - task_key: gold_features
+          notebook_task:
+            notebook_path: /Workspace/Users/trush.pn@ucu.edu.ua/Southern-Italy-Big-Data/06_score_city
+            source: WORKSPACE
+          environment_key: Default
+      queue:
+        enabled: true
+      parameters:
+        - name: city
+          default: rome
+        - name: snapshot
+          default: 2026-09-17
+        - name: source_path
+          default: italy/lazio/rome
+        - name: dry_run
+          default: yes
+        - name: run_label
+          default: first_run
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "6"
+      performance_target: PERFORMANCE_OPTIMIZED
