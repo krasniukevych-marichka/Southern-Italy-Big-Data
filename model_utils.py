@@ -1,7 +1,11 @@
-"""Спільний код моделі ціни: ознаки, split, baseline, пайплайн, метрики.
+"""Shared price-model code: features, split, baseline, pipeline, metrics.
 
-Імпортується з 05_train_model і 06_score_city (лежить у тій самій папці репозиторію).
-Тут немає нічого специфічного для Rome чи Sicily: усе, що залежить від міста, рахується з даних цього міста.
+Imported by 05_train_model and 06_score_city (lives in the same repository folder).
+Nothing here is specific to Rome or Sicily: everything city-dependent is computed from that city's own data.
+
+Two model specs live side by side so that the frozen v1 file keeps working:
+  v1 — week 1 model (absolute density, absolute log price target);
+  v2 — after the city C run: density relative to the city, price relative to the city's price level.
 """
 import numpy as np
 import pandas as pd
@@ -14,14 +18,13 @@ from sklearn.preprocessing import OneHotEncoder
 SEED = 42
 TEST_FRAC = 0.2
 
-# ---- ознаки (див. 01_eda, розділи 10–12) -----------------------------------
-NUM = [
-    "accommodates", "bedrooms", "beds", "bathrooms",             # розмір житла
-    "amenities_count",                                            # оснащення
-    "calculated_host_listings_count_entire_homes",                # професійний хост
+# ---- features (see 01_eda, sections 10–12) ------------------------------------
+NUM_BASE = [
+    "accommodates", "bedrooms", "beds", "bathrooms",             # size of the place
+    "amenities_count",                                            # equipment
+    "calculated_host_listings_count_entire_homes",                # professional host
     "calculated_host_listings_count_private_rooms",
     "host_tenure_months",
-    "log_density_1km", "log_density_5km",                         # локація без координат
 ]
 BOOL = [
     "bathrooms_shared", "long_stay", "min_nights_missing", "has_license",
@@ -29,28 +32,67 @@ BOOL = [
     "am_free_parking", "am_dishwasher", "am_workspace",
 ]
 CAT = ["room_type", "property_type"]
+
+DENSITY = ["log_density_1km", "log_density_5km"]
+DENSITY_REL = [c + "_rel" for c in DENSITY]
+
+SPECS = {
+    # v1: location = absolute density of listings around (location without coordinates)
+    "v1": {"num": NUM_BASE + DENSITY, "city_level": False},
+    # v2 (model changes after the city C first run):
+    #  1) density relative to the median density of the same city — in v1 "dense" also meant
+    #     "Rome-like price level", and Naples is denser than Rome but much cheaper;
+    #  2) target = log(price) − log(median price of the city's train split): the model learns
+    #     how much a listing deviates from its city's price level, and the level of a new city
+    #     is estimated from that city's own training split.
+    "v2": {"num": NUM_BASE + DENSITY_REL, "city_level": True},
+}
+
+# Backwards-compatible names (v1)
+NUM = SPECS["v1"]["num"]
 FEATURES = NUM + BOOL + CAT
 
-# Свідомо НЕ використовуємо:
+# Deliberately NOT used:
 #  - leakage: estimated_revenue_l365d, price_quote_*, price_per_guest, log_price;
-#  - наслідки ціни / невідомі для нового оголошення: number_of_reviews*, review_scores_*,
+#  - consequences of price / unknown for a new listing: number_of_reviews*, review_scores_*,
 #    reviews_per_month, availability_*, estimated_occupancy_l365d;
-#  - id, host_id, name, URL-и, snapshot-константи;
-#  - latitude/longitude і neighbourhood_cleansed: прив'язані до географії конкретного міста,
-#    не переносяться на нове місто (на A/B дають лише −0.6 EUR MAE);
-#  - city: модель має працювати на місті, якого не бачила.
+#  - id, host_id, name, URLs, snapshot constants;
+#  - latitude/longitude and neighbourhood_cleansed: tied to one city's geography,
+#    do not transfer to a new city (on A/B they improve MAE by only 0.6 EUR);
+#  - city: the model must work on a city it has never seen.
+
+
+def spec_of(art) -> str:
+    """Spec name of a saved artifact; files saved before v2 existed are v1."""
+    return art.get("spec", "v1") if isinstance(art, dict) else "v1"
+
+
+def features_of(spec: str) -> list:
+    return SPECS[spec]["num"] + BOOL + CAT
 
 
 def in_scope(df: pd.DataFrame) -> pd.Series:
-    """Рядки, на яких вчимо й оцінюємо: є ціна і це не помилка/заглушка (01_eda, п. 16)."""
+    """Rows used for training and evaluation: price present and not an error/placeholder (01_eda, item 16)."""
     return df["has_price"].fillna(False).astype(bool) & df["outlier_class"].isin(["normal", "tail"])
 
 
-def host_split(df: pd.DataFrame, seed: int = SEED, frac: float = TEST_FRAC) -> pd.Series:
-    """80/20 окремо в кожному місті, згрупований за host_id (01_eda, п. 18).
+def add_relative_density(df: pd.DataFrame) -> pd.DataFrame:
+    """log density minus the median log density of the same city.
 
-    Хости перемішуються з фіксованим seed, у test ідуть цілі хости, поки не набереться ~20%
-    оголошень міста. Результат не залежить від порядку рядків.
+    Pass ALL listings of a city (not only in-scope rows): the reference is the city's supply,
+    and price is not used.
+    """
+    df = df.copy()
+    for c in DENSITY:
+        df[c + "_rel"] = df[c] - df.groupby("city")[c].transform("median")
+    return df
+
+
+def host_split(df: pd.DataFrame, seed: int = SEED, frac: float = TEST_FRAC) -> pd.Series:
+    """80/20 split within each city, grouped by host_id (01_eda, item 18).
+
+    Hosts are shuffled with a fixed seed and whole hosts go to test until ~20% of the city's
+    listings are reached. The result does not depend on row order.
     """
     out = pd.Series("train", index=df.index, dtype="object")
     for _, g in df.groupby("city"):
@@ -62,9 +104,9 @@ def host_split(df: pd.DataFrame, seed: int = SEED, frac: float = TEST_FRAC) -> p
     return out
 
 
-# ---- baseline: медіана ціни за (room_type, accommodates) на train -----------------
+# ---- baseline: median price by (room_type, accommodates) on train -------------------
 def fit_baseline(train: pd.DataFrame) -> dict:
-    """Медіани з fallback: (room_type, accommodates) → room_type → уся вибірка."""
+    """Medians with fallback: (room_type, accommodates) → room_type → whole sample."""
     return {
         "cell": train.groupby(["room_type", "accommodates"])["price"].median().to_dict(),
         "room": train.groupby("room_type")["price"].median().to_dict(),
@@ -79,21 +121,35 @@ def predict_baseline(b: dict, df: pd.DataFrame) -> np.ndarray:
     ], dtype=float)
 
 
-# ---- модель -------------------------------------------------------------------
-def to_X(df: pd.DataFrame) -> pd.DataFrame:
-    X = df.reindex(columns=FEATURES).copy()
-    for c in NUM + BOOL:
+# ---- city price level (v2) ------------------------------------------------------
+def fit_city_level(train: pd.DataFrame) -> dict:
+    """{city: log(median price)} computed on the training split of each city."""
+    return {c: float(np.log(g["price"].astype(float).median())) for c, g in train.groupby("city")}
+
+
+def level_offset(df: pd.DataFrame, levels: dict) -> np.ndarray:
+    missing = set(df["city"].unique()) - set(levels)
+    if missing:
+        raise ValueError(f"No price level for {missing}: compute it with fit_city_level on that city's train split")
+    return df["city"].map(levels).to_numpy(float)
+
+
+# ---- model --------------------------------------------------------------------
+def to_X(df: pd.DataFrame, spec: str = "v1") -> pd.DataFrame:
+    num = SPECS[spec]["num"]
+    X = df.reindex(columns=num + BOOL + CAT).copy()
+    for c in num + BOOL:
         X[c] = pd.to_numeric(X[c].astype("float64"), errors="coerce")
     for c in CAT:
         X[c] = X[c].astype("object").where(X[c].notna(), "missing")
     return X
 
 
-def make_model() -> Pipeline:
+def make_model(spec: str = "v1") -> Pipeline:
     pre = ColumnTransformer([
-        # медіана рахується лише на train; add_indicator = флаг is_missing (01_eda, п. 24)
-        ("num", SimpleImputer(strategy="median", add_indicator=True), NUM + BOOL),
-        # рідкісні property_type (< 50 оголошень у train) → одна категорія «infrequent» (п. 23)
+        # median is learned on train only; add_indicator = is_missing flag (01_eda, item 24)
+        ("num", SimpleImputer(strategy="median", add_indicator=True), SPECS[spec]["num"] + BOOL),
+        # rare property_type (< 50 listings in train) → one "infrequent" category (item 23)
         ("cat", OneHotEncoder(handle_unknown="infrequent_if_exist", min_frequency=50,
                               sparse_output=False), CAT),
     ])
@@ -103,19 +159,25 @@ def make_model() -> Pipeline:
     return Pipeline([("pre", pre), ("gbm", gbm)])
 
 
-def fit_model(train: pd.DataFrame) -> Pipeline:
-    m = make_model()
-    m.fit(to_X(train), np.log(train["price"].astype(float)))   # таргет: log(price) (п. 17)
+def fit_model(train: pd.DataFrame, spec: str = "v1", levels: dict = None) -> Pipeline:
+    m = make_model(spec)
+    y = np.log(train["price"].astype(float)).to_numpy()            # target: log(price) (item 17)
+    if SPECS[spec]["city_level"]:
+        y = y - level_offset(train, levels)                        # v2: relative to the city level
+    m.fit(to_X(train, spec), y)
     return m
 
 
-def predict_model(m: Pipeline, df: pd.DataFrame) -> np.ndarray:
-    return np.exp(m.predict(to_X(df)))                          # назад у EUR
+def predict_model(m: Pipeline, df: pd.DataFrame, spec: str = "v1", levels: dict = None) -> np.ndarray:
+    z = m.predict(to_X(df, spec))
+    if SPECS[spec]["city_level"]:
+        z = z + level_offset(df, levels)
+    return np.exp(z)                                               # back to EUR
 
 
-# ---- метрики ------------------------------------------------------------------
+# ---- metrics ------------------------------------------------------------------
 def metrics_rows(df: pd.DataFrame, group_label=None) -> dict:
-    """df: тестові рядки з колонками price, baseline_pred, baseline_ab_pred, model_pred."""
+    """df: test rows with columns price, baseline_pred, baseline_ab_pred, model_pred."""
     y = df["price"].to_numpy(float)
     err = lambda col: np.abs(df[col].to_numpy(float) - y)
     mae_b = float(err("baseline_pred").mean())
