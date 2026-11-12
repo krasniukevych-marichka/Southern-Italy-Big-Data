@@ -27,18 +27,20 @@ silver.listings ──04 (city)──▶ gold.listing_features ──05 (A+B, on
 
 ## Test-set results on A and B
 
-| City | n test | Median price, € | Baseline MAE, € | v1 MAE, € | v2 MAE, € |
-|---|---|---|---|---|---|
-| Rome | 6,777 | 190 | 84.0 | **64.0** | 64.9 |
-| Sicily | 10,129 | 115 | 73.3 | **59.5** | 59.2 |
-| Both | 16,906 | 142 | 77.6 | **61.3** | 61.5 |
+| City | n test | Median price, € | Baseline MAE, € | v1 MAE, € | v2 MAE, € | v2 vs baseline |
+|---|---|---|---|---|---|---|
+| Rome | 6,777 | 190 | 84.02 | 63.99 | **64.19** | −23.6% |
+| Sicily | 10,129 | 115 | 73.30 | 59.38 | **58.99** | −19.5% |
+| Both | 16,906 | 142 | 77.59 | 61.23 | **61.07** | −21.3% |
 
-v1 beats the baseline by 21% (on Databricks, both cities together: 61.23 €). The v2 changes cost only €0.2 on A+B.
+All numbers are from the Databricks runs (`05_train_model`, `gold.model_metrics`). The v2 changes did not cost anything on A+B:
+the combined MAE is even slightly lower (61.07 vs 61.23), so making the model transferable came for free.
+
 The median absolute error is about €31 (MAE is pulled up by expensive villas). On average the model slightly under-prices (bias about −€19):
 a prediction made via `exp(log)` is closer to the median than to the mean, which is exactly what minimises MAE.
 
 Most important v1 features (MAE increase when the feature is shuffled): density within ~6 km (+€26), bathrooms (+7), guests (+5),
-density within ~1.5 km (+4), pool (+4), bedrooms (+4).
+density within ~1.5 km (+4), pool (+4), bedrooms (+4). In v2 the relative density within ~6 km drops to +€8 (still the top feature, but no longer standing in for the city), followed by guests (+6.5), bathrooms (+5.7), pool (+4.6) and bedrooms (+4.5).
 
 ## City C: Naples
 
@@ -89,9 +91,36 @@ the price level is the essential change, and relative density stops density from
 
 ### After the changes (v2)
 
+Both runs are evaluated on the same held-out Naples test split (2,157 listings, snapshot 2026-09-19).
+
 | | MAE, € |
 |---|---|
 | Baseline on Naples (own train split) | 58.39 |
-| Model v2 on A+B (test) | _fill in from 05 (v2)_ |
+| Model v1 on A+B (test) | 61.23 |
+| Model v2 on A+B (test) | 61.07 |
 | Model v1 on Naples — first run | 74.12 |
-| **Model v2 on Naples — after the changes** | _fill in from 06 (v2 / after_fix)_ |
+| **Model v2 on Naples — after the changes** | **54.45** |
+
+- v2 cuts the Naples error by **26.5%** compared with v1 (74.12 → 54.45).
+- v2 now **beats the Naples baseline by 6.7%** (58.39 → 54.45); v1 was 27% worse than it.
+
+### The remaining gap
+
+In euros, the Naples MAE (54.45) is even lower than on A+B (61.07), but only because Naples is cheaper. Relative to the price level the model is still
+weaker on Naples: MAE is about 49% of the median price in Naples (54.45 / 111.9) vs about 43% on A+B (61.07 / 142.3), and the gain over the baseline
+is 6.7% on Naples vs 21% on A+B. Likely reasons:
+- the model still learns *how* features change price only from Rome and Sicily; in Naples amenities are distributed differently
+  (pools 0.4% vs 10%, free parking 16% vs 56%), so the relative effects it learned fit Naples less well;
+- the city price level is a single number (the median of the Naples training split); it does not capture that the gap between
+  room types or between central and outer areas may be different in Naples;
+- the model has never seen a Naples listing; the only Naples information it uses is the price level and the city's own density distribution.
+
+A natural next step (not done, to keep the transfer test honest) would be to add the Naples training split to the training data and retrain.
+
+### Summary of changes for city C
+
+| Change | Kind | Effect on Naples MAE |
+|---|---|---|
+| None needed in the model part of the pipeline (scoring ran without errors) | pipeline fix | — |
+| Price relative to the city's price level (from the city's own train split) | model change | together: 74.12 → 54.45 |
+| Density relative to the city's own median density | model change | |
