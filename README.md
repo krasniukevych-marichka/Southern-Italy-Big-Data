@@ -1,5 +1,7 @@
 # Southern Italy Big Data — Airbnb Market Analysis & Price Prediction
 
+Presentation: https://canva.link/9lol1uvpl439ofq
+
 A Databricks-based end-to-end analytics project using **Inside Airbnb** listing snapshots to compare **Rome (A)** and **Sicily (B)**, build a reusable **Bronze → Silver → Gold** data pipeline, train an explainable nightly-price prediction model, and investigate its generalisation to **Naples (C)**.
 
 > **Geographical scope:** Rome is a city in central Italy; Sicily is an island/region in southern Italy. Their listing totals and neighbourhood counts represent different geographic scales and should not be interpreted as like-for-like market density measures.
